@@ -33,6 +33,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Smoke test application
+        shell: bash
+        run: |
+          docker build             --tag devops-diplom-app:smoke             .
+
+          docker run             --detach             --name devops-diplom-app-smoke             --publish 8080:80             devops-diplom-app:smoke
+
+          for attempt in {1..30}; do
+            if curl               --fail               --silent               http://127.0.0.1:8080/               | grep --quiet "DevOps Diplom"
+            then
+              echo "Smoke test passed."
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          echo "Smoke test failed."
+          docker logs devops-diplom-app-smoke
+          exit 1
+
       - name: Select image tag
         id: image
         shell: bash
@@ -84,7 +105,37 @@ jobs:
       - name: Wait for rollout
         shell: bash
         run: |
-          kubectl rollout status \
-            "deployment/${KUBE_DEPLOYMENT}" \
-            --namespace="${KUBE_NAMESPACE}" \
-            --timeout=180s
+          for attempt in {1..60}; do
+            DESIRED="$(
+              kubectl get deployment "${KUBE_DEPLOYMENT}"                 --namespace="${KUBE_NAMESPACE}"                 --output=jsonpath='{.spec.replicas}'
+            )"
+
+            UPDATED="$(
+              kubectl get deployment "${KUBE_DEPLOYMENT}"                 --namespace="${KUBE_NAMESPACE}"                 --output=jsonpath='{.status.updatedReplicas}'
+            )"
+
+            READY="$(
+              kubectl get deployment "${KUBE_DEPLOYMENT}"                 --namespace="${KUBE_NAMESPACE}"                 --output=jsonpath='{.status.readyReplicas}'
+            )"
+
+            AVAILABLE="$(
+              kubectl get deployment "${KUBE_DEPLOYMENT}"                 --namespace="${KUBE_NAMESPACE}"                 --output=jsonpath='{.status.availableReplicas}'
+            )"
+
+            UPDATED="${UPDATED:-0}"
+            READY="${READY:-0}"
+            AVAILABLE="${AVAILABLE:-0}"
+
+            echo "desired=${DESIRED} updated=${UPDATED} ready=${READY} available=${AVAILABLE}"
+
+            if [[ "${UPDATED}" == "${DESIRED}"               && "${READY}" == "${DESIRED}"               && "${AVAILABLE}" == "${DESIRED}" ]]
+            then
+              echo "Deployment rollout completed."
+              exit 0
+            fi
+
+            sleep 3
+          done
+
+          echo "Deployment rollout timed out."
+          exit 1
