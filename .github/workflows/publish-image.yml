@@ -1,14 +1,25 @@
-name: Publish image
+name: Build and deploy application
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
 
 permissions:
   contents: read
   packages: write
 
+env:
+  IMAGE_NAME: ghcr.io/andsuntsov/devops-diplom-app
+  KUBE_NAMESPACE: devops-diplom
+  KUBE_DEPLOYMENT: devops-diplom-app
+  KUBE_CONTAINER: app
+
 jobs:
-  publish:
+  build:
+    name: Build and push image
     runs-on: ubuntu-latest
 
     steps:
@@ -22,11 +33,58 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Select image tag
+        id: image
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            IMAGE_TAG="${GITHUB_REF_NAME}"
+          else
+            IMAGE_TAG="latest"
+          fi
+
+          echo "tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE_NAME}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/andsuntsov/devops-diplom-app:latest
+          tags: ${{ steps.image.outputs.image }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  deploy:
+    name: Deploy to Kubernetes
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure Kubernetes access
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.kube"
+          printf '%s' "${{ secrets.KUBE_CONFIG }}" > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Deploy image
+        shell: bash
+        run: |
+          kubectl set image \
+            "deployment/${KUBE_DEPLOYMENT}" \
+            "${KUBE_CONTAINER}=${IMAGE_NAME}:${GITHUB_REF_NAME}" \
+            --namespace="${KUBE_NAMESPACE}"
+
+      - name: Wait for rollout
+        shell: bash
+        run: |
+          kubectl rollout status \
+            "deployment/${KUBE_DEPLOYMENT}" \
+            --namespace="${KUBE_NAMESPACE}" \
+            --timeout=180s
